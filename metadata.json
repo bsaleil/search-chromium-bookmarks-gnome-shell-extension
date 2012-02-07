@@ -1,0 +1,7 @@
+{
+	"shell-version": ["3.2"],
+	"uuid": "search-chromium-bookmarks@bsaleil.org",
+	"name": "Search Chromium bookmarks",
+	"description": "Search in Chromium bookmarks and show results in the overview",
+	"url": "http://bsaleil.org/"
+}
