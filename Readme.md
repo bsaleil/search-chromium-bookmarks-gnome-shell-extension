@@ -10,3 +10,4 @@ The original version is by bsaleil (see the repository this is forked from), thi
 
 * google chrome (~/.config/google-chrome/Default/bookmarks)
 * show favicons instead of application icon (requires reading the sqlite file History?)
+* GIO file monitor for bookmark path change
