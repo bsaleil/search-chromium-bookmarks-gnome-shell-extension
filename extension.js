@@ -1,7 +1,7 @@
 // This extension is developed by Baptiste Saleil
 // Contact me if you have any problem, bug,...
 // http://bsaleil.org/
-// 
+//
 // Licence: GPLv2+
 
 const Main = imports.ui.main;
@@ -15,137 +15,148 @@ const Util = imports.misc.util;
 let ShellVersion = imports.misc.config.PACKAGE_VERSION.split('.');
 
 // Useful constants
+const DELIM = '!';
 // File that contains the chromium bookmarks
-const FILEPATH = GLib.get_home_dir() + "/.config/chromium/Default/Bookmarks";
-// Chromium executable file path
-const CHROMIUMPATH = "/usr/bin/chromium-browser";
-// Title in the overview
-const OVERVIEWTITLE = "CHROMIUM BOOKMARKS";
+const BookmarkPaths = {
+    'chromium':
+        GLib.build_filenamev([
+            GLib.get_user_config_dir(),
+            'chromium/Default/Bookmarks'
+        ]),
+    'google-chrome':
+        GLib.build_filenamev([
+            GLib.get_user_config_dir(),
+            'google-chrome/Default/Bookmarks'
+        ])
+};
 
-// for them to have ~/.config/chromium they must have chromium installed.
-// (TODO: google-chrome?)
-let chromium = Shell.AppSystem.get_default().initial_search(['chromium'])[0];
-
-// Useful vars
 // Lock the instance of the search provider
 var ChromiumInst = null;
-// Contains all the bookmarks
-var bookmarksTab = new Array();
-// Monitor for chromium bookmarks
-var bookmarksMonitor = null;
 
-function ChromiumBookmarksSearch()
-{
+function ChromiumBookmarksSearch() {
 	this._init();
 }
 
-ChromiumBookmarksSearch.prototype = 
-{
+ChromiumBookmarksSearch.prototype = {
 	__proto__: Search.SearchProvider.prototype,
 
-	_init: function() 
-	{
-		Search.SearchProvider.prototype._init.call(this, OVERVIEWTITLE);
+	_init: function () {
+		Search.SearchProvider.prototype._init.call(this, _("CHROMIUM/CHROME BOOKMARKS"));
 
-		// Connect to bookmarks file changes
-		//GLib.file_test(FILEPATH, GLib.FileTest.EXISTS);
-		if (!GLib.file_test(FILEPATH, GLib.FileTest.EXISTS))
-		{
-			global.logError("Error while reading bookmarks file.");
-			return false;
-		}
-		
-		let file = Gio.file_new_for_path(FILEPATH);
-		bookmarksMonitor = file.monitor(Gio.FileMonitorFlags.NONE, null);
-		bookmarksMonitor.connect('changed', Lang.bind(this, this._readChromiumBookmarks));
-		
-		this._readChromiumBookmarks();
-		return true;
+        // work out which of google-chrome and chromium-browser is installed
+        let appSys = Shell.AppSystem.get_default();
+        this._apps = {};
+        this._bookmarks = {};
+        // determine what is installed.
+        for (let appn in BookmarkPaths) {
+            if (!BookmarkPaths.hasOwnProperty(appn)) {
+                continue;
+            }
+            let app = appSys.initial_search([app]);
+            if (!app.length) {
+                return;
+            }
+            let bookmarksPath = BookmarkPaths[appn];
+            let file = Gio.file_new_for_path(bookmarksPath),
+                monitor = file.monitor(Gio.MonitorFlags.NONE, null);
+            monitor.connect('changed', Lang.bind(this, function () {
+                this._readBookmarks(appn);
+            }));
+            this._apps[appn] = {
+                path: bookmarksPath,
+                monitor: monitor,
+                app: app[0]
+            };
+            this._readBookmarks(appn);
+        }
 	},
 	
-	// Read and store all chromium bookmarks in "bookmarksTab"
-	_readChromiumBookmarks: function()
-	{
-		if (!GLib.file_test(FILEPATH, GLib.FileTest.EXISTS))
-		{
-			global.logError("Error while reading bookmarks file.");
-			return;
+	// Read and store all chromium bookmarks in this._bookmarks
+	_readBookmarks: function (appn) {
+        let appInfo = this._apps[appn];
+		if (!appInfo || !GLib.file_test(appInfo.path, GLib.FileTest.EXISTS)) {
+            return;
 		}
 		
-		let data;
-		data = GLib.file_get_contents(FILEPATH, null, 0);
-		// data[1] represents the content of the file
-		let dataJson = JSON.parse(data[1]);
-				
-		bookmarksTab = new Array();
-		
+		let data = GLib.file_get_contents(appInfo.path, null, 0);
+        try {
+            // data[1] represents the content of the file
+            data = JSON.parse(data[1]);
+        } catch (e) {
+            log('Error reading bookmarks file %s: %s'.format(appInfo.path, e.message));
+            return;
+        }
+
+        // delete old bookmarks for this app
+        for (let bm in this._bookmarks) {
+            if (!this._bookmarks.hasOwnProperty(bm)) {
+                return;
+            }
+            if (bm.substr(0, appn.length + DELIM.length) === (appn + DELIM)) {
+                delete this._bookmarks[bm];
+            }
+        }
+
 		// Bookmark_Bar and other folders
-		let bookmarksJson = dataJson.roots.bookmark_bar.children;
-		readFolder(bookmarksJson);
-		let bookmarksJson = dataJson.roots.other.children;
-		readFolder(bookmarksJson);
-		
-		// Read and store all bookmarks from a folder
-		function readFolder(folder)
-		{
-			for (let i=0; i<folder.length; i++)
-			{
-				if (folder[i].type == "url")
-				{
-					bookmarksTab.push({
-						'pos': bookmarksTab.length,
-						'name': folder[i].name,
-						'url': folder[i].url});
-				}
-				else if (folder[i].type == "folder")
-				{ readFolder(folder[i].children); }
-			}
-		}
+		this._readFolder(data.roots.bookmark_bar.children, appn);
+		this._readFolder(data.roots.other.children, appn);
 	},
-	
-	getResultMeta: function(resultId)
-	{
-		return {'id': resultId,
-			'name': bookmarksTab[resultId.pos].name,
-			'createIcon': function(size) {
-                return chromium.create_icon_texture(size);
-            }}
-	}, 
 
-	getResultMetas: function(ids, callback)
-	{
+    // Read and store all bookmarks from a folder (utility function)
+    _readFolder: function (folder, appn) {
+        for (let i = 0; i < folder.length; i++) {
+            let bm = folder[i];
+            if (bm.type === 'url') {
+                // ID is [appname][delimiter][bookmark.id], where 'delimiter'
+                // should be something that doesn't appear in appname.
+                let id = appn + DELIM + bm.id;
+                this._bookmarks[id] = {
+                    id: id,
+                    name: bm.name,
+                    match_against: (bm.name + bm.url).toLowerCase().replace(/\s/g, ''),
+                    url: bm.url,
+                    app: this._apps[appn].app,
+                    createIcon: Lang.bind(this, function (size) {
+                        return this._apps[appn].app.create_icon_texture(size);
+                    })
+                };
+            } else if (bm.type === 'folder') {
+                this._readFolder(bm.children, appn);
+            }
+        }
+    },
+	
+	getResultMeta: function (resultId) {
+		return this._bookmarks[resultId];
+	},
+
+	getResultMetas: function (ids, callback) {
         let metas = ids.map(this.getResultMeta);
         if (callback) {
             callback(metas);
         }
         return metas;
-	}, 
-	
-	activateResult: function(id) 
-	{
-		Util.spawn([CHROMIUMPATH, '', id.url]);
 	},
-	
-	getInitialResultSet: function(terms) 
-	{
+
+	activateResult: function (id) {
+        let result = this._bookmarks[id];
+        // timestamp, URIs, workspace
+        result.app.launch(global.get_current_time(), [result.url], -1);
+	},
+
+	getInitialResultSet: function (terms) {
 		let results = [];
-		for (let i=0; i<bookmarksTab.length; i++)
-		{
-			// concat name and url and remove spaces
-			let str = bookmarksTab[i].name + bookmarksTab[i].url;
-			str = str.replace(/\s/g,'');
-			
-			// remove spaces of 'terms'
-			let prePattern = "";
-			for (let j=0; j<terms.length; j++)
-			{
-				if (terms[j] != '') prePattern+=terms[j];
-			}
-			let pattern = new RegExp(prePattern,"gi");
-			
-			// Search pattern into str
-			if (str.match(pattern))
-				results.push(bookmarksTab[i]);
+        let pattern = terms.join('').replace(/\s/g, '').toLowerCase();
+        for (let id in this._bookmarks) {
+            if (!this._bookmarks.hasOwnProperty(id)) {
+                continue;
+            }
+            let bm = this._bookmarks[id];
+
+			// Search pattern into lowercase name + url
+			if (bm.match_against.indexOf(pattern) > -1) {
+				results.push(bm);
+            }
 		}
         if (ShellVersion[1] >= 6) {
             this.searchSystem.pushResults(this, results);
@@ -153,18 +164,26 @@ ChromiumBookmarksSearch.prototype =
 		return results;
 	},
 
-	getSubsearchResultSet: function(previousResults, terms)
-	{
+	getSubsearchResultSet: function (previousResults, terms) {
 		return this.getInitialResultSet(terms);
 	},
+
+    destroy: function () {
+        for (let appn in this._apps) {
+            if (!this._apps.hasOwnProperty(appn)) {
+                continue;
+            }
+            this._apps[appn].monitor.cancel();
+            delete this._apps[appn];
+        }
+        this._bookmarks = {};
+    }
+};
+
+function init() {
 }
 
-function init(metadata)
-{
-}
-
-function enable()
-{
+function enable() {
 	if (ChromiumInst == null)
 	{
 		ChromiumInst = new ChromiumBookmarksSearch();
@@ -172,12 +191,11 @@ function enable()
 	}
 }
 
-function disable()
-{
+function disable() {
 	if (ChromiumInst != null)
 	{
 		Main.overview.removeSearchProvider(ChromiumInst);
+		ChromiumInst.destroy();
 		ChromiumInst = null;
 	}
-	bookmarksMonitor.cancel();
 }
