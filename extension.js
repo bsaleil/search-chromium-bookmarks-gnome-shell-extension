@@ -12,6 +12,8 @@ const Lang = imports.lang;
 const Shell = imports.gi.Shell;
 const Util = imports.misc.util;
 
+let ShellVersion = imports.misc.config.PACKAGE_VERSION.split('.');
+
 // Useful constants
 // File that contains the chromium bookmarks
 const FILEPATH = GLib.get_home_dir() + "/.config/chromium/Default/Bookmarks";
@@ -19,8 +21,10 @@ const FILEPATH = GLib.get_home_dir() + "/.config/chromium/Default/Bookmarks";
 const CHROMIUMPATH = "/usr/bin/chromium-browser";
 // Title in the overview
 const OVERVIEWTITLE = "CHROMIUM BOOKMARKS";
-// Icon used by clutter to display results
-const ICONCLUTTER = "chromium-browser.desktop"
+
+// for them to have ~/.config/chromium they must have chromium installed.
+// (TODO: google-chrome?)
+let chromium = Shell.AppSystem.get_default().initial_search(['chromium'])[0];
 
 // Useful vars
 // Lock the instance of the search provider
@@ -65,7 +69,7 @@ ChromiumBookmarksSearch.prototype =
 		if (!GLib.file_test(FILEPATH, GLib.FileTest.EXISTS))
 		{
 			global.logError("Error while reading bookmarks file.");
-			return false;
+			return;
 		}
 		
 		let data;
@@ -101,11 +105,20 @@ ChromiumBookmarksSearch.prototype =
 	
 	getResultMeta: function(resultId)
 	{
-		let appSys = Shell.AppSystem.get_default();
-        	let app = appSys.lookup_app(ICONCLUTTER);
 		return {'id': resultId,
 			'name': bookmarksTab[resultId.pos].name,
-			'createIcon': function(size) {return app.create_icon_texture(size);}}
+			'createIcon': function(size) {
+                return chromium.create_icon_texture(size);
+            }}
+	}, 
+
+	getResultMetas: function(ids, callback)
+	{
+        let metas = ids.map(this.getResultMeta);
+        if (callback) {
+            callback(metas);
+        }
+        return metas;
 	}, 
 	
 	activateResult: function(id) 
@@ -134,6 +147,9 @@ ChromiumBookmarksSearch.prototype =
 			if (str.match(pattern))
 				results.push(bookmarksTab[i]);
 		}
+        if (ShellVersion[1] >= 6) {
+            this.searchSystem.pushResults(this, results);
+        }
 		return results;
 	},
 
