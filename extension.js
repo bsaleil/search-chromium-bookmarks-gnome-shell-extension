@@ -136,7 +136,7 @@ ChromiumBookmarksSearch.prototype = {
 	},
 
 	getResultMetas: function (ids, callback) {
-        let metas = ids.map(this.getResultMeta);
+        let metas = ids.map(Lang.bind(this, this.getResultMeta));
         if (callback) {
             callback(metas);
         }
