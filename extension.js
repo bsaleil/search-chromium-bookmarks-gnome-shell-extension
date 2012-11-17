@@ -1,7 +1,7 @@
 // This extension is developed by Baptiste Saleil
 // Contact me if you have any problem, bug,...
 // http://bsaleil.org/
-// 
+//
 // Licence: GPLv2+
 
 const Main = imports.ui.main;
@@ -12,156 +12,239 @@ const Lang = imports.lang;
 const Shell = imports.gi.Shell;
 const Util = imports.misc.util;
 
-// Useful constants
-// File that contains the chromium bookmarks
-const FILEPATH = GLib.get_home_dir() + "/.config/chromium/Default/Bookmarks";
-// Chromium executable file path
-const CHROMIUMPATH = "/usr/bin/chromium-browser";
-// Title in the overview
-const OVERVIEWTITLE = "CHROMIUM BOOKMARKS";
-// Icon used by clutter to display results
-const ICONCLUTTER = "chromium-browser.desktop"
+let ShellVersion = imports.misc.config.PACKAGE_VERSION.split('.');
 
-// Useful vars
+// Useful constants
+const DELIM = '!';
+// File that contains the chromium bookmarks
+const BookmarkPaths = {
+    'chromium':
+        GLib.build_filenamev([
+            GLib.get_user_config_dir(),
+            'chromium/Default/Bookmarks'
+        ]),
+    'google-chrome':
+        GLib.build_filenamev([
+            GLib.get_user_config_dir(),
+            'google-chrome/Default/Bookmarks'
+        ])
+};
+// GNOME 3.2 and 3.4: FileMonitorFlags. 3.6 (TODO: CHECK) MonitorFlags
+if (!Gio.FileMonitorFlags) {
+    Gio.FileMonitorFlags = Gio.MonitorFlags;
+}
+
 // Lock the instance of the search provider
 var ChromiumInst = null;
-// Contains all the bookmarks
-var bookmarksTab = new Array();
-// Monitor for chromium bookmarks
-var bookmarksMonitor = null;
 
-function ChromiumBookmarksSearch()
-{
+function ChromiumBookmarksSearch() {
 	this._init();
 }
 
-ChromiumBookmarksSearch.prototype = 
-{
+ChromiumBookmarksSearch.prototype = {
 	__proto__: Search.SearchProvider.prototype,
 
-	_init: function() 
-	{
-		Search.SearchProvider.prototype._init.call(this, OVERVIEWTITLE);
+	_init: function () {
+		Search.SearchProvider.prototype._init.call(this, _("CHROMIUM/CHROME BOOKMARKS"));
 
-		// Connect to bookmarks file changes
-		//GLib.file_test(FILEPATH, GLib.FileTest.EXISTS);
-		if (!GLib.file_test(FILEPATH, GLib.FileTest.EXISTS))
-		{
-			global.logError("Error while reading bookmarks file.");
-			return false;
-		}
-		
-		let file = Gio.file_new_for_path(FILEPATH);
-		bookmarksMonitor = file.monitor(Gio.FileMonitorFlags.NONE, null);
-		bookmarksMonitor.connect('changed', Lang.bind(this, this._readChromiumBookmarks));
-		
-		this._readChromiumBookmarks();
-		return true;
+        // work out which of google-chrome and chromium-browser is installed
+        let appSys = Shell.AppSystem.get_default();
+        this._apps = {};
+        this._bookmarks = {};
+        // determine what is installed.
+        for (let appn in BookmarkPaths) {
+            if (!BookmarkPaths.hasOwnProperty(appn)) {
+                continue;
+            }
+            let app = appSys.initial_search([appn]);
+            if (!app.length) {
+                continue;
+            }
+            let bookmarksPath = BookmarkPaths[appn];
+            let file = Gio.file_new_for_path(bookmarksPath),
+                monitor = file.monitor(Gio.FileMonitorFlags.NONE, null);
+            monitor.connect('changed', Lang.bind(this, function () {
+                this._readBookmarks(appn);
+            }));
+            this._apps[appn] = {
+                path: bookmarksPath,
+                monitor: monitor,
+                app: app[0]
+            };
+            this._readBookmarks(appn);
+        }
 	},
 	
-	// Read and store all chromium bookmarks in "bookmarksTab"
-	_readChromiumBookmarks: function()
-	{
-		if (!GLib.file_test(FILEPATH, GLib.FileTest.EXISTS))
-		{
-			global.logError("Error while reading bookmarks file.");
-			return false;
+	// Read and store all chromium bookmarks in this._bookmarks
+	_readBookmarks: function (appn) {
+        let appInfo = this._apps[appn];
+		if (!appInfo || !GLib.file_test(appInfo.path, GLib.FileTest.EXISTS)) {
+            return;
 		}
 		
-		let data;
-		data = GLib.file_get_contents(FILEPATH, null, 0);
-		// data[1] represents the content of the file
-		let dataJson = JSON.parse(data[1]);
-				
-		bookmarksTab = new Array();
-		
+		let data = GLib.file_get_contents(appInfo.path, null, 0);
+        try {
+            // data[1] represents the content of the file
+            data = JSON.parse(data[1]);
+        } catch (e) {
+            log('Error reading bookmarks file %s: %s'.format(appInfo.path, e.message));
+            return;
+        }
+
+        // delete old bookmarks for this app
+        for (let bm in this._bookmarks) {
+            if (!this._bookmarks.hasOwnProperty(bm)) {
+                continue;
+            }
+            if (bm.substr(0, appn.length + DELIM.length) === (appn + DELIM)) {
+                delete this._bookmarks[bm];
+            }
+        }
+
 		// Bookmark_Bar and other folders
-		let bookmarksJson = dataJson.roots.bookmark_bar.children;
-		readFolder(bookmarksJson);
-		let bookmarksJson = dataJson.roots.other.children;
-		readFolder(bookmarksJson);
-		
-		// Read and store all bookmarks from a folder
-		function readFolder(folder)
-		{
-			for (let i=0; i<folder.length; i++)
-			{
-				if (folder[i].type == "url")
-				{
-					bookmarksTab.push({
-						'pos': bookmarksTab.length,
-						'name': folder[i].name,
-						'url': folder[i].url});
-				}
-				else if (folder[i].type == "folder")
-				{ readFolder(folder[i].children); }
-			}
-		}
+		this._readFolder(data.roots.bookmark_bar.children, appn);
+		this._readFolder(data.roots.other.children, appn);
 	},
+
+    // Read and store all bookmarks from a folder (utility function)
+    _readFolder: function (folder, appn) {
+        for (let i = 0; i < folder.length; i++) {
+            let bm = folder[i];
+            if (bm.type === 'url') {
+                // ID is [appname][delimiter][bookmark.id], where 'delimiter'
+                // should be something that doesn't appear in appname.
+                let id = appn + DELIM + bm.id;
+                this._bookmarks[id] = {
+                    id: id,
+                    name: bm.name,
+                    url_lower: bm.url.toLowerCase(),
+                    name_lower: bm.name.toLowerCase(),
+                    url: bm.url,
+                    app: this._apps[appn].app,
+                    createIcon: Lang.bind(this, function (size) {
+                        return this._apps[appn].app.create_icon_texture(size);
+                    })
+                };
+            } else if (bm.type === 'folder') {
+                this._readFolder(bm.children, appn);
+            }
+        }
+    },
 	
-	getResultMeta: function(resultId)
-	{
-		let appSys = Shell.AppSystem.get_default();
-        	let app = appSys.lookup_app(ICONCLUTTER);
-		return {'id': resultId,
-			'name': bookmarksTab[resultId.pos].name,
-			'createIcon': function(size) {return app.create_icon_texture(size);}}
-	}, 
-	
-	activateResult: function(id) 
-	{
-		Util.spawn([CHROMIUMPATH, '', id.url]);
+	getResultMeta: function (resultId) {
+		return this._bookmarks[resultId];
 	},
-	
-	getInitialResultSet: function(terms) 
-	{
-		let results = [];
-		for (let i=0; i<bookmarksTab.length; i++)
-		{
-			// concat name and url and remove spaces
-			let str = bookmarksTab[i].name + bookmarksTab[i].url;
-			str = str.replace(/\s/g,'');
-			
-			// remove spaces of 'terms'
-			let prePattern = "";
-			for (let j=0; j<terms.length; j++)
-			{
-				if (terms[j] != '') prePattern+=terms[j];
-			}
-			let pattern = new RegExp(prePattern,"gi");
-			
-			// Search pattern into str
-			if (str.match(pattern))
-				results.push(bookmarksTab[i]);
+
+	getResultMetas: function (ids, callback) {
+        let metas = ids.map(Lang.bind(this, this.getResultMeta));
+        if (callback) {
+            callback(metas);
+        }
+        return metas;
+	},
+
+	activateResult: function (id) {
+        let result = this._bookmarks[id];
+        // timestamp, URIs, workspace
+        result.app.launch(global.get_current_time(), [result.url], -1);
+	},
+
+    _searchBookmarks: function (bookmarks, terms) {
+        /* Items where term matches multiple criteria (e.g. name and URL)
+         * before single matches.
+         * Items which match on a prefix before non-prefix substring matches.
+         */
+        let prefixMatch = [];
+        let otherMatch = [];
+        for (let id = 0; id < bookmarks.length; ++id) {
+            let bm = this._bookmarks[bookmarks[id]];
+
+            // you must match *all* terms.
+            let matches = false,
+                prefix = false;
+            for (let i = 0; i < terms.length; ++i) {
+                let urlMatch = bm.url_lower.indexOf(terms[i]),
+                    nameMatch = bm.name_lower.indexOf(terms[i]);
+                if (urlMatch === -1 && nameMatch === -1) {
+                    matches = false;
+                    break;
+                }
+                matches = true;
+                if (urlMatch === 0 || nameMatch === 0) {
+                    prefix = true;
+                }
+            }
+            if (!matches) {
+                continue;
+            }
+            if (prefix) {
+                prefixMatch.push(bm);
+            } else {
+                otherMatch.push(bm);
+            }
 		}
+        // sort by name.
+        // TODO: should really sort by "relevance"/score the prefix
+        // and title a little higher than a url or substring match?
+        prefixMatch.sort(function (bm1, bm2) {
+            return bm1.name > bm2.name;
+        });
+        otherMatch.sort(function (bm1, bm2) {
+            return bm1.name > bm2.name;
+        });
+        let results = prefixMatch.concat(otherMatch).map(function (bm) {
+            return bm.id;
+        });
+        return results;
+    },
+
+    // TODO: make this async to speed things up?
+    // On GNOME 3.2: getInitialResultSet should be fast, use this.addItems for
+    // async.
+    // On GNOME 3.4: there appears to be *Async methods that user pushResults
+    // On GNOME 3.6: just use .pushResults for everything.
+	getInitialResultSet: function (terms) {
+        let results = this._searchBookmarks(Object.keys(this._bookmarks), terms);
+        if (ShellVersion[1] >= 6) {
+            this.searchSystem.pushResults(this, results);
+        }
 		return results;
 	},
 
-	getSubsearchResultSet: function(previousResults, terms)
-	{
-		return this.getInitialResultSet(terms);
+	getSubsearchResultSet: function (previousResults, terms) {
+        let results = this._searchBookmarks(previousResults, terms);
+        if (ShellVersion[1] >= 6) {
+            this.searchSystem.pushResults(this, results);
+        }
+		return results;
 	},
+
+    destroy: function () {
+        for (let appn in this._apps) {
+            if (!this._apps.hasOwnProperty(appn)) {
+                continue;
+            }
+            this._apps[appn].monitor.cancel();
+            delete this._apps[appn];
+        }
+        this._bookmarks = {};
+    }
+};
+
+function init() {
 }
 
-function init(metadata)
-{
-}
-
-function enable()
-{
-	if (ChromiumInst == null)
-	{
+function enable() {
+	if (ChromiumInst == null) {
 		ChromiumInst = new ChromiumBookmarksSearch();
 		Main.overview.addSearchProvider(ChromiumInst);
 	}
 }
 
-function disable()
-{
-	if (ChromiumInst != null)
-	{
+function disable() {
+	if (ChromiumInst != null) {
 		Main.overview.removeSearchProvider(ChromiumInst);
+		ChromiumInst.destroy();
 		ChromiumInst = null;
 	}
-	bookmarksMonitor.cancel();
 }
